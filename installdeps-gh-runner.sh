@@ -38,6 +38,10 @@ build_aur_pkg /tmp/yay "" true
 # Building google-breakpad (runtime dependency for quickshell)
 build_aur_pkg /tmp/google-breakpad "" true
 
+# Building cpptrace (missing dependency)
+git clone https://aur.archlinux.org/cpptrace.git
+build_aur_pkg /tmp/cpptrace "" true
+
 # Building zen-browser (--nodeps needed due to circular dependency in AUR PKGBUILD)
 build_aur_pkg /tmp/zen-browser-bin "--nodeps"
 
@@ -51,10 +55,6 @@ build_aur_pkg /tmp/iNiR/sdata/dist-arch/inir-toolkit
 build_aur_pkg /tmp/iNiR/sdata/dist-arch/inir-audio
 build_aur_pkg /tmp/iNiR/sdata/dist-arch/inir-screencapture
 build_aur_pkg /tmp/iNiR/sdata/dist-arch/inir-fonts
-
-# Building cpptrace (missing dependency)
-git clone https://aur.archlinux.org/cpptrace.git
-build_aur_pkg /tmp/cpptrace "" true
 
 # Installing AUR font dependencies for iNiR
 git clone https://aur.archlinux.org/matugen-bin.git
