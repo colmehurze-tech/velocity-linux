@@ -52,6 +52,10 @@ build_aur_pkg /tmp/iNiR/sdata/dist-arch/inir-audio
 build_aur_pkg /tmp/iNiR/sdata/dist-arch/inir-screencapture
 build_aur_pkg /tmp/iNiR/sdata/dist-arch/inir-fonts
 
+# Building cpptrace (missing dependency)
+git clone https://aur.archlinux.org/cpptrace.git
+build_aur_pkg /tmp/cpptrace "" true
+
 # Installing AUR font dependencies for iNiR
 git clone https://aur.archlinux.org/matugen-bin.git
 build_aur_pkg /tmp/matugen-bin
