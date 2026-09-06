@@ -1,9 +1,6 @@
 # Getting tools to build the iso
-pacman -Syu --noconfirm archiso squashfs-tools sed
-            
-# If zstd compression fails, uncomment the line below to use gzip instead
-#sed -i 's/_squashfscomp=.*/_squashfscomp=(\"gzip\")/' /workspace/releng/profiledef.sh
-            
-# Build the ISO
-cd /workspace 
-mkarchiso -v /workspace/releng 
+pacman -Syu --noconfirm archiso squashfs-tools
+
+# Build the ISO (compression is zstd by default in releng/profiledef.sh)
+cd /workspace
+mkarchiso -v /workspace/releng

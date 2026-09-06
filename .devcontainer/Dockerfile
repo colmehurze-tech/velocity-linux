@@ -2,6 +2,5 @@
 FROM archlinux:latest
 
 # Update system and install necessary packages
-RUN pacman -Syu --noconfirm base-devel git vim python
-
-# Any other setup steps or package installations can go here
+# Includes archiso for local ISO building, plus build tools
+RUN pacman -Syu --noconfirm archiso squashfs-tools git vim base-devel python

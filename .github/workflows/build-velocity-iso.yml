@@ -12,12 +12,12 @@ env:
 
 jobs:
   build-iso:
-    runs-on: ubuntu-latest 
-    
+    runs-on: ubuntu-latest
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-    
+
     - name: Clean up GitHub runner disk
       run: |
         # Free up maximum space on the 14GB runner
@@ -33,30 +33,22 @@ jobs:
         docker image prune -a -f
         echo "=== Available space after cleanup ==="
         df -h
-      
+
     - name: Set file permissions
       run: |
         chmod 755 releng/airootfs/usr/share/backgrounds
         chmod 755 releng/airootfs/usr/share/backgrounds/velocity
         chmod 644 releng/airootfs/usr/share/backgrounds/velocity/default-wallpaper.jpg
-    
-  
-    - name: Debug compression settings
-      run: |
-        docker run --rm \
-          -v "$(pwd):/workspace" \
-          archlinux:latest \
-          /bin/bash -c "
-            echo '=== Your profiledef.sh compression setting ==='
-            grep '_squashfscomp' /workspace/releng/profiledef.sh
-            echo '=== Testing available compressors ==='
-            pacman -Syu --noconfirm squashfs-tools
-            echo 'test' > /tmp/test.txt
-            mksquashfs /tmp/test.txt /tmp/test.sfs -comp zstd && echo 'zstd: WORKS' || echo 'zstd: FAILED'
-            mksquashfs /tmp/test.txt /tmp/test.sfs -comp gzip && echo 'gzip: WORKS' || echo 'gzip: FAILED'
-          "
-      
-    - name: Build ISO with Docker (privileged)
+
+    - name: Cache pacman and AUR packages
+      uses: actions/cache@v4
+      with:
+        path: |
+          /tmp/pipac-cache
+          /var/cache/pacman/pkg
+        key: ${{ runner.os }}-velocity-pacman-${{ hashFiles('installdeps-gh-runner.sh') }}
+
+    - name: Build AUR packages
       run: |
         # Run archlinux container with privileged mode for mounting
         docker run --privileged --rm \
@@ -66,9 +58,19 @@ jobs:
           /bin/bash -c "
             chmod +x *.sh
             /workspace/installdeps-gh-runner.sh
+          "
+
+    - name: Build ISO
+      run: |
+        docker run --privileged --rm \
+          -v "$(pwd):/workspace" \
+          -w /workspace \
+          archlinux:latest \
+          /bin/bash -c "
+            chmod +x *.sh
             /workspace/buildiso-gh-runner.sh
           "
-    
+
     - name: Get ISO info
       id: iso-info
       run: |
@@ -85,26 +87,33 @@ jobs:
         echo "iso_file=$ISO_FILE" >> $GITHUB_OUTPUT
         echo "iso_size=$ISO_SIZE" >> $GITHUB_OUTPUT
         echo "ISO: $ISO_FILE ($ISO_SIZE)"
-    
+
     - name: Test ISO integrity
       run: |
         cd out
         ISO_FILE=$(ls *.iso)
+        echo "=== Verifying ISO 9660 filesystem ==="
         file $ISO_FILE | grep "ISO 9660"
+        echo "=== Checking ISO size ==="
         ISO_SIZE_BYTES=$(stat -c%s "$ISO_FILE")
         if [ $ISO_SIZE_BYTES -lt 500000000 ]; then
-          echo "❌ ISO seems too small"
+          echo "❌ ISO seems too small (<500MB)"
           exit 1
         fi
+        echo "✅ ISO is $ISO_SIZE_BYTES bytes (>=500MB)"
+        echo "=== Checking squashfs image ==="
+        isoinfo -d -i "$ISO_FILE" | head -5
+        echo "=== Computing checksum ==="
+        sha256sum $ISO_FILE
         echo "✅ ISO integrity check passed"
-    
+
     - name: Upload ISO artifact
       uses: actions/upload-artifact@v4
       with:
         name: ${{ env.ISO_NAME }}-${{ github.sha }}
         path: out/*.iso
         retention-days: 30
-    
+
     - name: Create GitHub Release
       if: startsWith(github.ref, 'refs/tags/')
       uses: softprops/action-gh-release@v1
@@ -112,12 +121,12 @@ jobs:
         files: out/*.iso
         body: |
           Automated build of Velocity Linux
-          
+
           **Build Details:**
           - Commit: ${{ github.sha }}
           - Triggered by: ${{ github.event_name }}
           - ISO Size: ${{ steps.iso-info.outputs.iso_size }}
-          
+
           **Verification:**
           ```bash
           sha256sum ${{ steps.iso-info.outputs.iso_file }}

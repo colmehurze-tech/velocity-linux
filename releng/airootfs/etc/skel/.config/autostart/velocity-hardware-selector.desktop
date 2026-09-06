@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Velocity Hardware Selector
+Comment=Review and confirm your desktop configuration recommendation
+Exec=/usr/bin/velocity-hardware-selector
+Icon=preferences-system
+Terminal=true
+X-GNOME-Autostart-enabled=true

@@ -58,4 +58,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: epiphany-binpkg
-          path: ./local_pack ages/
+          path: ./local_packages/

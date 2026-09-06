@@ -1,0 +1,14 @@
+[Unit]
+Description=Velocity Hardware Analyzer — Analyzes hardware and recommends desktop configuration at boot
+After=systemd-udev-settle.service
+Before=graphical-session-pre.target
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/velocity-hardware-analyzer --output /run/velocity/hardware-profile.json --apply
+RemainAfterExit=yes
+StandardOutput=journal+console
+
+[Install]
+WantedBy=multi-user.target

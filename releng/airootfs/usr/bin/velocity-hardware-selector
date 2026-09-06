@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""
+velocity-hardware-selector
+==========================
+Interactive TUI that shows the detected hardware, the recommended desktop
+configuration tier, and lets the user accept or override it before applying.
+
+Designed for first-time users who boot the live ISO and want to see what
+configuration was chosen for their hardware.
+
+Usage:
+    velocity-hardware-selector
+    velocity-hardware-selector --noninteractive   # just print recommendation
+"""
+
+import curses
+import json
+import os
+import sys
+import subprocess
+from pathlib import Path
+
+PROFILE_PATH = "/run/velocity/hardware-profile.json"
+SEEN_MARKER = "/etc/velocity/.selector-seen"
+ANALYZER = "/usr/bin/velocity-hardware-analyzer"
+APPLY = "/usr/bin/velocity-apply-profile"
+TIERS = ["low", "medium", "high"]
+TIER_NAMES = {
+    "low": "Light (Performance Priority)",
+    "medium": "Balanced",
+    "high": "Full (Visuals Priority)",
+}
+
+
+def run_analyzer():
+    """Run the analyzer to get a fresh profile."""
+    result = subprocess.run(
+        ["python3", ANALYZER, "--output", PROFILE_PATH, "--apply"],
+        capture_output=True, text=True,
+    )
+    if os.path.exists(PROFILE_PATH):
+        with open(PROFILE_PATH) as f:
+            return json.load(f)
+    print("Hardware analysis failed:", result.stderr)
+    sys.exit(1)
+
+
+def load_profile():
+    if os.path.exists(PROFILE_PATH):
+        with open(PROFILE_PATH) as f:
+            return json.load(f)
+    return run_analyzer()
+
+
+def draw_screen(stdscr, profile, selected_idx):
+    curses.curs_set(0)
+    stdscr.clear()
+    h, w = stdscr.getmaxyx()
+
+    # Header
+    title = "Velocity Linux — Hardware Configuration Selector"
+    stdscr.addstr(1, (w - len(title)) // 2, title, curses.A_BOLD)
+    stdscr.addstr(2, 2, "=" * (w - 4))
+
+    # Hardware summary
+    hw = profile["hardware"]
+    y = 4
+    stdscr.addstr(y, 2, f"Detected Hardware (score: {profile['score']}/100)", curses.A_UNDERLINE)
+    y += 2
+    stdscr.addstr(y, 4, f"CPU:      {hw['cpu']['cores']} cores — {hw['cpu']['model']}")
+    y += 1
+    stdscr.addstr(y, 4, f"RAM:      {hw['ram_gb']} GB")
+    y += 1
+    stdscr.addstr(y, 4, f"GPU:      {hw['gpu']['vendor']} ({hw['gpu']['type']})")
+    y += 1
+    stdscr.addstr(y, 4, f"Storage:  {hw['storage']['type']} ({hw['storage']['size_gb']} GB)")
+    y += 1
+    stdscr.addstr(y, 4, f"System:   {hw['system_type']}")
+    y += 3
+
+    # Tier options
+    stdscr.addstr(y, 2, "Recommended Desktop Profile:", curses.A_UNDERLINE)
+    y += 2
+
+    for i, tier in enumerate(TIERS):
+        name = TIER_NAMES[tier]
+        desc = profile["recommendation"]["description"] if i == TIERS.index(profile["tier"]) else TIERS[i]
+        prefix = "> " if i == selected_idx else "  "
+        label = f"{prefix}[{i+1}] {name}"
+        stdscr.addstr(y, 4, label, curses.A_BOLD if i == selected_idx else 0)
+        y += 1
+        short_desc = {
+            "low": "Animations off, minimal effects, full opacity",
+            "medium": "Smooth animations, light shadows, moderate transparency",
+            "high": "Full animations, shadows, blur, transparency",
+        }[tier]
+        stdscr.addstr(y, 6, short_desc)
+        y += 2
+
+    # Footer
+    stdscr.addstr(h - 2, 2, "Press ENTER to apply, ESC/Q to skip, Up/Down to change selection")
+    stdscr.addstr(h - 1, 2, f"Profile will be saved to {PROFILE_PATH}")
+
+
+def main():
+    noninteractive = "--noninteractive" in sys.argv
+
+    if noninteractive:
+        profile = load_profile()
+        print(json.dumps(profile, indent=2))
+        sys.exit(0)
+
+    # Skip if user has already seen and dismissed the selector
+    if os.path.exists(SEEN_MARKER):
+        sys.exit(0)
+
+    profile = load_profile()
+    initial_tier = profile["tier"]
+    selected_idx = TIERS.index(initial_tier)
+
+    def curses_main(stdscr):
+        nonlocal selected_idx, profile
+
+        while True:
+            draw_screen(stdscr, profile, selected_idx)
+            stdscr.refresh()
+            key = stdscr.getch()
+
+            if key in (curses.KEY_UP,):
+                selected_idx = max(0, selected_idx - 1)
+            elif key in (curses.KEY_DOWN,):
+                selected_idx = min(len(TIERS) - 1, selected_idx + 1)
+            elif key in (curses.KEY_ENTER, 10, 13):
+                # Apply selected tier
+                chosen_tier = TIERS[selected_idx]
+                if chosen_tier != profile["tier"]:
+                    # Re-run analyzer with the chosen tier
+                    subprocess.run(
+                        ["python3", ANALYZER, "--tier", chosen_tier, "--output", PROFILE_PATH, "--apply"],
+                        capture_output=True, text=True,
+                    )
+                    if os.path.exists(PROFILE_PATH):
+                        with open(PROFILE_PATH) as f:
+                            profile = json.load(f)
+
+                # Apply profile to live session
+                subprocess.run([APPLY, "--profile", PROFILE_PATH], capture_output=True, text=True)
+                # Mark as seen so the selector does not reappear
+                os.makedirs("/etc/velocity", exist_ok=True)
+                Path(SEEN_MARKER).touch()
+                return 0
+
+            elif key in (27, ord('q'), ord('Q')):
+                # Mark as seen even if skipped
+                os.makedirs("/etc/velocity", exist_ok=True)
+                Path(SEEN_MARKER).touch()
+                return 0
+
+    try:
+        return curses.wrapper(curses_main)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

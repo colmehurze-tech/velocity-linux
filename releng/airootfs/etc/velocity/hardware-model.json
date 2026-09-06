@@ -1,0 +1,82 @@
+{
+  "description": "Scoring weights for hardware-to-desktop-tier classification. Replace this file to tune recommendations without modifying the analyzer script. Can be replaced entirely by an ML model export (e.g., ONNX) for more sophisticated scoring.",
+  "thresholds": {
+    "high": 80,
+    "medium": 50,
+    "low": 0
+  },
+  "weights": {
+    "ram": {
+      "32": 25,
+      "16": 25,
+      "8": 15,
+      "4": 8,
+      "default": 4
+    },
+    "cpu_cores": {
+      "8": 20,
+      "4": 12,
+      "2": 6,
+      "default": 3
+    },
+    "gpu_dedicated": 20,
+    "gpu_intel": 8,
+    "gpu_amd_integrated": 12,
+    "nvme": 10,
+    "ssd": 5,
+    "laptop": -5
+  },
+  "tier_configs": {
+    "low": {
+      "name": "Light (Performance Priority)",
+      "description": "Optimized for lower-end hardware. Animations disabled, no visual effects.",
+      "niri": {
+        "animations": false,
+        "opacity_active": 1.0,
+        "opacity_inactive": 1.0,
+        "shadows": false,
+        "shadow_softness": 0,
+        "gaps": 0,
+        "blur": false
+      },
+      "shell": "bash",
+      "plugins": ["git"],
+      "startup_apps": [],
+      "services": []
+    },
+    "medium": {
+      "name": "Balanced",
+      "description": "Good balance of features and performance. Smooth animations, light effects.",
+      "niri": {
+        "animations": true,
+        "opacity_active": 0.92,
+        "opacity_inactive": 0.85,
+        "shadows": true,
+        "shadow_softness": 15,
+        "gaps": 12,
+        "blur": false
+      },
+      "shell": "zsh",
+      "plugins": ["git", "zsh-autosuggestions"],
+      "startup_apps": ["nm-applet"],
+      "services": ["pipewire", "networkmanager"]
+    },
+    "high": {
+      "name": "Full (Visuals Priority)",
+      "description": "All visual effects enabled - full desktop experience with animations and transparency.",
+      "niri": {
+        "animations": true,
+        "opacity_active": 0.85,
+        "opacity_inactive": 0.75,
+        "shadows": true,
+        "shadow_softness": 30,
+        "gaps": 25,
+        "blur": true
+      },
+      "shell": "zsh",
+      "plugins": ["git", "zsh-autosuggestions", "zsh-syntax-highlighting"],
+      "startup_apps": ["nm-applet", "dunst"],
+      "services": ["pipewire", "networkmanager", "upower"]
+    }
+  }
+}

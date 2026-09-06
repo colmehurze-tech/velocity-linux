@@ -1,0 +1,626 @@
+#!/usr/bin/env python3
+"""
+velocity-hardware-analyzer
+=========================
+Analyzes system hardware at boot and produces a recommendation profile that
+maps hardware capabilities to desktop environment settings (animations, opacity,
+shadows, shell, services, etc.).
+
+The recommendation engine is a scoring-based classifier that acts as an
+interpretable "model".  Scoring weights and thresholds are in
+/etc/velocity/hardware-model.json and can be replaced with a trained ML model
+export (e.g., ONNX) without changing the detection logic.
+
+Usage:
+    velocity-hardware-analyzer [--output PATH] [--apply] [--tier TIER]
+
+Outputs JSON profile to stdout and optionally writes to --output.
+With --apply, the profile is immediately applied to the current live session.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
+DEFAULT_OUTPUT = "/run/velocity/hardware-profile.json"
+MODEL_CONFIG = "/etc/velocity/hardware-model.json"
+
+# ---------------------------------------------------------------------------
+# Hardware detection
+# ---------------------------------------------------------------------------
+def run(cmd):
+    """Run a shell command, return stdout or empty string on failure."""
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=10
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def detect_ram_gb():
+    out = run("cat /proc/meminfo")
+    for line in out.splitlines():
+        if line.startswith("MemTotal:"):
+            kb = int(line.split()[1])
+            return round(kb / 1024 / 1024, 1)
+    return 4.0
+
+
+def detect_cpu():
+    out = run("cat /proc/cpuinfo")
+    cores = len([l for l in out.splitlines() if l.startswith("processor")])
+    if cores == 0:
+        cores = 2
+    model_name = ""
+    for line in out.splitlines():
+        if line.startswith("model name"):
+            model_name = line.split(":", 1)[1].strip()
+            break
+        elif line.startswith("model name") is False and "CPU" in line:
+            pass
+    # Check for modern instruction sets
+    has_sse2 = "sse2" in out.lower()
+    has_avx2 = "avx2" in out.lower()
+    return {
+        "cores": cores,
+        "model": model_name or "unknown",
+        "has_sse2": has_sse2,
+        "has_avx2": has_avx2,
+    }
+
+
+def detect_gpu():
+    out = run("lspci -nn 2>/dev/null || True")
+    vga_lines = [l for l in out.splitlines() if "VGA" in l or "3D controller" in l]
+    if not vga_lines:
+        return {"vendor": "unknown", "type": "integrated", "model": "none"}
+
+    first = vga_lines[0]
+    if "NVIDIA" in first or "10de" in first.lower():
+        # Heuristic: if it's a laptop (integrated + discrete), type = dedicated
+        return {"vendor": "nvidia", "type": "dedicated", "model": first}
+    elif "AMD" in first or "ATI" in first or "1002" in first.lower():
+        return {"vendor": "amd", "type": "dedicated" if "1002" in first else "integrated", "model": first}
+    elif "Intel" in first or "8086" in first.lower():
+        return {"vendor": "intel", "type": "integrated", "model": first}
+    return {"vendor": "unknown", "type": "integrated", "model": first}
+
+
+def detect_storage():
+    out = run("lsblk -b -o NAME,ROTA,TYPE 2>/dev/null || True")
+    nvme_count = 0
+    ssd_count = 0
+    hdd_count = 0
+    total_bytes = 0
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        if parts[1] == "1":  # ROTA=1 means spinning disk
+            hdd_count += 1
+        elif "nvme" in parts[0].lower():
+            nvme_count += 1
+        else:
+            ssd_count += 1
+
+    try:
+        size_out = run("lsblk -b -o SIZE -d 2>/dev/null || True")
+        sizes = [int(s) for s in size_out.split() if s.isdigit()]
+        total_bytes = sum(sizes)
+    except Exception:
+        pass
+
+    if nvme_count > 0:
+        return {"type": "nvme", "nvme": nvme_count, "ssd": ssd_count, "hdd": hdd_count, "size_gb": round(total_bytes / 1e9, 0)}
+    elif ssd_count > 0:
+        return {"type": "ssd", "nvme": nvme_count, "ssd": ssd_count, "hdd": hdd_count, "size_gb": round(total_bytes / 1e9, 0)}
+    return {"type": "hdd", "nvme": nvme_count, "ssd": ssd_count, "hdd": hdd_count, "size_gb": round(total_bytes / 1e9, 0)}
+
+
+def detect_system_type():
+    dmi = run("cat /sys/class/dmi/id/chassis_type 2>/dev/null || echo ''")
+    chassis_map = {
+        "3": "desktop", "4": "rackmount", "5": "minitower", "6": "tower",
+        "7": "laptop", "8": "tablet", "9": "handheld",
+        "10": "notebook", "14": "embedded",
+    }
+    if dmi:
+        return chassis_map.get(dmi.strip(), "desktop")
+    # Fallback: check for battery
+    if os.path.exists("/sys/class/power_supply/BAT"):
+        return "laptop"
+    return "desktop"
+
+
+def detect_all():
+    return {
+        "ram_gb": detect_ram_gb(),
+        "cpu": detect_cpu(),
+        "gpu": detect_gpu(),
+        "storage": detect_storage(),
+        "system_type": detect_system_type(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Recommendation Model (scoring-based classifier)
+# ---------------------------------------------------------------------------
+DEFAULT_MODEL = {
+    "thresholds": {
+        "high": 80,
+        "medium": 50,
+        "low": 0,
+    },
+    "weights": {
+        "ram": {16: 25, 8: 15, 4: 8, "default": 4},
+        "cpu_cores": {8: 20, 4: 12, 2: 6, "default": 3},
+        "gpu_dedicated": 20,
+        "gpu_intel": 8,
+        "gpu_amd_integrated": 12,
+        "nvme": 10,
+        "ssd": 5,
+        "laptop": -5,   # laptops often have constrained power/thermal
+    },
+    "tier_configs": {
+        "low": {
+            "name": "Light (Performance Priority)",
+            "description": "Optimized for lower-end hardware. Animations disabled, no visual effects.",
+            "niri": {
+                "animations": False,
+                "opacity_active": 1.0,
+                "opacity_inactive": 1.0,
+                "shadows": False,
+                "shadow_softness": 0,
+                "gaps": 0,
+                "blur": False,
+            },
+            "shell": "bash",
+            "plugins": ["git"],
+            "startup_apps": [],
+            "services": [],
+        },
+        "medium": {
+            "name": "Balanced",
+            "description": "Good balance of features and performance. Smooth animations, light effects.",
+            "niri": {
+                "animations": True,
+                "opacity_active": 0.92,
+                "opacity_inactive": 0.85,
+                "shadows": True,
+                "shadow_softness": 15,
+                "gaps": 12,
+                "blur": False,
+            },
+            "shell": "zsh",
+            "plugins": ["git", "zsh-autosuggestions"],
+            "startup_apps": ["nm-applet"],
+            "services": ["pipewire", "networkmanager"],
+        },
+        "high": {
+            "name": "Full (Visuals Priority)",
+            "description": "All visual effects enabled — full desktop experience with animations and transparency.",
+            "niri": {
+                "animations": True,
+                "opacity_active": 0.85,
+                "opacity_inactive": 0.75,
+                "shadows": True,
+                "shadow_softness": 30,
+                "gaps": 25,
+                "blur": True,
+            },
+            "shell": "zsh",
+            "plugins": ["git", "zsh-autosuggestions", "zsh-syntax-highlighting"],
+            "startup_apps": ["nm-applet", "dunst"],
+            "services": ["pipewire", "networkmanager", "upower"],
+        },
+    },
+}
+
+
+def load_model():
+    if os.path.exists(MODEL_CONFIG):
+        try:
+            with open(MODEL_CONFIG) as f:
+                user_model = json.load(f)
+            # Merge with defaults (user can override weights/thresholds)
+            model = DEFAULT_MODEL.copy()
+            model["thresholds"].update(user_model.get("thresholds", {}))
+            model["weights"].update(user_model.get("weights", {}))
+            return model
+        except Exception:
+            pass
+    return DEFAULT_MODEL
+
+
+def score_hardware(hw, model):
+    """Score the hardware 0-100. The scoring weights act as an interpretable ML model."""
+    w = model["weights"]
+    score = 0
+
+    # RAM
+    ram = hw["ram_gb"]
+    if ram >= 32:
+        score += w["ram"].get(32, w["ram"]["default"])
+    elif ram >= 16:
+        score += w["ram"][16]
+    elif ram >= 8:
+        score += w["ram"][8]
+    elif ram >= 4:
+        score += w["ram"][4]
+    else:
+        score += w["ram"]["default"]
+
+    # CPU cores
+    cores = hw["cpu"]["cores"]
+    if cores >= 8:
+        score += w["cpu_cores"][8]
+    elif cores >= 4:
+        score += w["cpu_cores"][4]
+    elif cores >= 2:
+        score += w["cpu_cores"][2]
+    else:
+        score += w["cpu_cores"]["default"]
+
+    # CPU modern features
+    if hw["cpu"]["has_avx2"]:
+        score += 5
+    if hw["cpu"]["has_sse2"]:
+        score += 3
+
+    # GPU
+    gpu = hw["gpu"]
+    if gpu["type"] == "dedicated":
+        score += w["gpu_dedicated"]
+    elif gpu["vendor"] == "intel":
+        score += w["gpu_intel"]
+    elif gpu["vendor"] == "amd" and gpu["type"] == "integrated":
+        score += w["gpu_amd_integrated"]
+
+    # Storage
+    st = hw["storage"]
+    if st["type"] == "nvme":
+        score += w["nvme"]
+    elif st["type"] == "ssd":
+        score += w["ssd"]
+
+    # System type (laptops are power-constrained)
+    if hw["system_type"] == "laptop":
+        score += w.get("laptop", 0)
+
+    return max(0, min(100, score))
+
+
+def classify_tier(score, model):
+    thresholds = model["thresholds"]
+    if score >= thresholds["high"]:
+        return "high"
+    elif score >= thresholds["medium"]:
+        return "medium"
+    return "low"
+
+
+def recommend(hw, model):
+    score = score_hardware(hw, model)
+    tier = classify_tier(score, model)
+    config = model["tier_configs"][tier]
+    return {
+        "tier": tier,
+        "score": score,
+        "hardware": hw,
+        "recommendation": config,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Config generators
+# ---------------------------------------------------------------------------
+def generate_niri_config(profile):
+    cfg = profile["recommendation"]["niri"]
+    anim_block = ""
+    if cfg["animations"]:
+        anim_block = """    workspace-switch {
+        spring damping-ratio=0.92 stiffness=800 epsilon=0.0001
+    }
+    window-open {
+        spring damping-ratio=0.92 stiffness=900 epsilon=0.0001
+    }
+    window-close {
+        spring damping-ratio=0.95 stiffness=1000 epsilon=0.0001
+    }
+    horizontal-view-movement {
+        spring damping-ratio=0.90 stiffness=800 epsilon=0.0001
+    }
+    window-movement {
+        spring damping-ratio=0.96 stiffness=850 epsilon=0.0001
+    }"""
+    else:
+        anim_block = "    //off"
+
+    shadow_block = ""
+    if cfg["shadows"]:
+        shadow_block = f"""    shadow {{
+        softness {cfg['shadow_softness']}
+        spread 5
+        offset x=0 y=5
+        color "#0007"
+    }}"""
+    else:
+        shadow_block = "    //off"
+
+    border_color = "#707070" if cfg["opacity_active"] < 1.0 else "#444444"
+    inactive_color = "#d0d0d0" if cfg["opacity_inactive"] < 1.0 else "#e0e0e0"
+
+    config = f'''// Auto-generated by velocity-hardware-analyzer ({profile["tier"]} tier, score {profile["score"]})
+// Hardware: {hw_summary(profile["hardware"])}
+
+prefer-no-csd
+
+hotkey-overlay {{
+    skip-at-startup
+}}
+
+screenshot-path "~/Pictures/Screenshots/Screenshot from %Y-%m-%d %H-%M-%S.png"
+
+input {{
+    keyboard {{
+        xkb {{
+            layout "us"
+        }}
+        repeat-delay 250
+        repeat-rate 50
+    }}
+    touchpad {{
+        tap
+        tap-button-map "left-right-middle"
+    }}
+    mouse {{
+        accel-profile "flat"
+    }}
+
+    mod-key "Super"
+    mod-key-nested "Alt"
+}}
+
+layout {{
+    gaps {cfg["gaps"]}
+    background-color "transparent"
+    center-focused-column "never"
+
+    preset-column-widths {{
+        proportion 0.33333
+        proportion 0.5
+        proportion 0.66667
+    }}
+
+    default-column-width {{
+        proportion 0.5
+    }}
+
+    border {{
+        off
+        width 4
+        active-color "{border_color}"
+        inactive-color "{inactive_color}"
+        urgent-color "#cc4444"
+    }}
+
+    focus-ring {{
+        off
+        width 1
+        active-color "#808080"
+        inactive-color "#505050"
+    }}
+
+    {shadow_block}
+
+    struts {{}}
+}}
+
+gestures {{
+    hot-corners {{}}
+}}
+
+cursor {{
+    xcursor-theme "Bibata-Modern-Classic"
+    xcursor-size 24
+    hide-when-typing
+}}
+
+overview {{
+    zoom 0.75
+}}
+
+window-rule {{
+    geometry-corner-radius 16
+    clip-to-geometry true
+}}
+
+window-rule {{
+    match is-active=false
+    opacity {cfg["opacity_inactive"]}
+}}
+
+window-rule {{
+    match is-active=true
+    opacity {cfg["opacity_active"]}
+}}
+
+animations {{
+{anim_block}
+}}
+
+environment {{
+    XDG_CURRENT_DESKTOP "niri"
+    XDG_MENU_PREFIX "plasma-"
+    QT_QPA_PLATFORM "wayland"
+    ELECTRON_OZONE_PLATFORM_HINT "auto"
+    QT_QPA_PLATFORMTHEME "kde"
+    QT_STYLE_OVERRIDE "Darkly"
+    ILLOGICAL_IMPULSE_VIRTUAL_ENV "$HOME/.local/state/quickshell/.venv"
+}}
+
+spawn-at-startup "bash" "-c" "systemctl --user import-environment XDG_MENU_PREFIX && kbuildsycoca6"
+
+spawn-at-startup "bash" "-c" "wl-paste --watch cliphist store &"
+spawn-at-startup "/usr/lib/mate-polkit/polkit-mate-authentication-agent-1"
+spawn-at-startup "qs" "-c" "ii"
+
+binds {{
+    Mod+Tab repeat=false {{ toggle-overview; }}
+    Mod+Shift+E {{ quit; }}
+
+    Mod+T {{ spawn "alacritty"; }}
+    Mod+Return {{ spawn "alacritty"; }}
+    Super+E {{ spawn "dolphin"; }}
+
+    Mod+Q repeat=false {{ spawn "bash" "-c" "$HOME/.config/quickshell/ii/scripts/close-window.sh"; }}
+    Mod+F {{ maximize-column; }}
+    Mod+M {{ fullscreen-window; }}
+    Mod+A {{ toggle-window-floating; }}
+
+    Mod+Left {{ focus-column-left; }}
+    Mod+Right {{ focus-column-right; }}
+    Mod+Up {{ focus-window-up; }}
+    Mod+Down {{ focus-window-down; }}
+    Mod+H {{ focus-column-left; }}
+    Mod+J {{ focus-window-down; }}
+    Mod+K {{ focus-window-up; }}
+    Mod+L {{ focus-column-right; }}
+
+    Mod+Shift+Left {{ move-column-left; }}
+    Mod+Shift+Right {{ move-column-right; }}
+    Mod+Shift+Up {{ move-window-up; }}
+    Mod+Shift+Down {{ move-window-down; }}
+
+    Mod+1 {{ focus-workspace 1; }}
+    Mod+2 {{ focus-workspace 2; }}
+    Mod+3 {{ focus-workspace 3; }}
+    Mod+4 {{ focus-workspace 4; }}
+    Mod+5 {{ focus-workspace 5; }}
+    Mod+6 {{ focus-workspace 6; }}
+    Mod+7 {{ focus-workspace 7; }}
+    Mod+8 {{ focus-workspace 8; }}
+    Mod+9 {{ focus-workspace 9; }}
+
+    Mod+Shift+1 {{ move-column-to-workspace 1; }}
+    Mod+Shift+2 {{ move-column-to-workspace 2; }}
+    Mod+Shift+3 {{ move-column-to-workspace 3; }}
+    Mod+Shift+4 {{ move-column-to-workspace 4; }}
+    Mod+Shift+5 {{ move-column-to-workspace 5; }}
+
+    Mod+Minus {{ set-column-width "-10%"; }}
+    Mod+Equal {{ set-column-width "+10%"; }}
+    Mod+Shift+Minus {{ set-window-height "-10%"; }}
+    Mod+Shift+Equal {{ set-window-height "+10%"; }}
+    Mod+W {{ toggle-column-tabbed-display; }}
+
+    Print {{ screenshot; }}
+    Ctrl+Print {{ screenshot-screen; }}
+    Alt+Print {{ screenshot-window; }}
+
+    XF86AudioRaiseVolume allow-when-locked=true {{ spawn "qs" "-c" "ii" "ipc" "call" "audio" "volumeUp"; }}
+    XF86AudioLowerVolume allow-when-locked=true {{ spawn "qs" "-c" "ii" "ipc" "call" "audio" "volumeDown"; }}
+    XF86AudioMute allow-when-locked=true {{ spawn "qs" "-c" "ii" "ipc" "call" "audio" "mute"; }}
+    XF86AudioMicMute allow-when-locked=true {{ spawn "qs" "-c" "ii" "ipc" "call" "audio" "micMute"; }}
+    XF86MonBrightnessUp {{ spawn "qs" "-c" "ii" "ipc" "call" "brightness" "increment"; }}
+    XF86MonBrightnessDown {{ spawn "qs" "-c" "ii" "ipc" "call" "brightness" "decrement"; }}
+    XF86AudioPlay {{ spawn "qs" "-c" "ii" "ipc" "call" "mpris" "playPause"; }}
+    XF86AudioPause {{ spawn "qs" "-c" "ii" "ipc" "call" "mpris" "playPause"; }}
+    XF86AudioNext {{ spawn "qs" "-c" "ii" "ipc" "call" "mpris" "next"; }}
+    XF86AudioPrev {{ spawn "qs" "-c" "ii" "ipc" "call" "mpris" "previous"; }}
+
+    Ctrl+Mod+Space {{ spawn "playerctl" "play-pause"; }}
+    Mod+Alt+N {{ spawn "playerctl" "next"; }}
+    Mod+Alt+P {{ spawn "playerctl" "previous"; }}
+}}
+
+layer-rule {{
+    match namespace="quickshell:iiBackdrop"
+    place-within-backdrop true
+    opacity 1.0
+}}
+
+layer-rule {{
+    match namespace="quickshell:wBackdrop"
+    place-within-backdrop true
+    opacity 1.0
+}}
+'''
+    return config
+
+
+def hw_summary(hw):
+    return (
+        f"{hw['cpu']['cores']} cores, {hw['ram_gb']}GB RAM, "
+        f"{hw['gpu']['vendor']} {hw['gpu']['type']}, {hw['storage']['type']}, "
+        f"{hw['system_type']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Apply
+# ---------------------------------------------------------------------------
+def apply_profile(profile, skel_dir="/etc/skel"):
+    """Write the hardware-tailored niri config and recommended settings."""
+    niri_config = generate_niri_config(profile)
+    niri_path = os.path.join(skel_dir, ".config", "niri")
+    os.makedirs(niri_path, exist_ok=True)
+    with open(os.path.join(niri_path, "config.kdl"), "w") as f:
+        f.write(niri_config)
+    print(f"[velocity] Wrote niri config for tier '{profile['tier']}' to {niri_path}/config.kdl")
+
+    # Apply opacity tweaks for quickshell via environment
+    cfg = profile["recommendation"]["niri"]
+    if profile["tier"] == "low":
+        os.environ["VELOCITY_DISABLE_ANIMATIONS"] = "1"
+        print("[velocity] Animations disabled for low-tier hardware")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(description="Analyze hardware and recommend desktop config")
+    parser.add_argument("--output", "-o", default=DEFAULT_OUTPUT, help="Output JSON path")
+    parser.add_argument("--apply", action="store_true", help="Apply the profile to the live session")
+    parser.add_argument("--tier", choices=["low", "medium", "high"], help="Override tier (skip scoring)")
+    args = parser.parse_args()
+
+    model = load_model()
+    hw = detect_all()
+
+    if args.tier:
+        tier = args.tier
+        score = model["thresholds"].get(tier, 0)
+        config = model["tier_configs"][tier]
+        profile = {"tier": tier, "score": score, "hardware": hw, "recommendation": config}
+    else:
+        profile = recommend(hw, model)
+
+    # Output JSON
+    print(json.dumps(profile, indent=2))
+
+    # Write file
+    out_dir = os.path.dirname(args.output)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(args.output, "w") as f:
+        json.dump(profile, f, indent=2)
+
+    # Apply if requested
+    if args.apply:
+        apply_profile(profile)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

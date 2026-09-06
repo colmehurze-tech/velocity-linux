@@ -62,15 +62,17 @@ Session=niri.desktop
 EOF
 
 #Set file permissions
-chmod 755 releng/airootfs/usr/share/backgrounds
-chmod 755 releng/airootfs/usr/share/backgrounds/velocity
-chmod 644 releng/airootfs/usr/share/backgrounds/velocity/default-wallpaper.jpg
-chmod 755 releng/airootfs/etc/skel/.config/autostart
-chmod 644 releng/airootfs/etc/skel/.config/autostart/set-wallpaper.desktop
-chmod 755 releng/airootfs/usr/share/icons
-chmod 777 releng/airootfs/usr/share/icons/velocity.png
+chmod 755 /usr/share/backgrounds
+chmod 755 /usr/share/backgrounds/velocity
+chmod 644 /usr/share/backgrounds/velocity/default-wallpaper.jpg
+chmod 755 /etc/skel/.config/autostart
+chmod 644 /etc/skel/.config/autostart/set-wallpaper.desktop
+chmod 755 /usr/share/icons
+chmod 777 /usr/share/icons/velocity.png
 chmod +x /usr/bin/oh-my-posh
-chmod +x /usr/bin/yay
+chmod +x /usr/bin/velocity-hardware-analyzer
+chmod +x /usr/bin/velocity-apply-profile
+chmod +x /usr/bin/velocity-hardware-selector
 
 # Set up automatic login on TTY1 (fallback)
 mkdir -p /etc/systemd/system/getty@tty1.service.d/
@@ -97,5 +99,8 @@ if [ -d "/etc/skel" ]; then
 fi
 
 # Enable SDDM and Network Manager
-systemctl enable sddm 
+systemctl enable sddm
 systemctl enable NetworkManager.service
+
+# Enable hardware analyzer at boot
+systemctl enable velocity-hardware-analyze.service

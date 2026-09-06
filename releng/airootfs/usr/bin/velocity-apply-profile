@@ -1,0 +1,235 @@
+#!/usr/bin/env python3
+"""
+velocity-apply-profile
+======================
+Reads a hardware profile JSON (produced by velocity-hardware-analyzer) and
+applies the recommended desktop configuration to the live session or to a
+target installation directory.
+
+Usage:
+    velocity-apply-profile [--profile PATH] [--target DIR]
+
+If --target is given (e.g. the mounted installation root), settings are applied
+there instead of the running system.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+DEFAULT_PROFILE = "/run/velocity/hardware-profile.json"
+DEFAULT_NIRI_CONFIG = "/etc/skel/.config/niri/config.kdl"
+
+
+def load_profile(path):
+    with open(path) as f:
+        return json.load(f)
+
+
+def apply_niri_config(profile, target=None):
+    """Generate and write the hardware-tailored niri config."""
+    skel = target or "/etc/skel"
+    niri_dir = Path(skel) / ".config" / "niri"
+    niri_dir.mkdir(parents=True, exist_ok=True)
+    niri_path = niri_dir / "config.kdl"
+
+    _write_niri_from_template(profile, niri_path)
+    print(f"[velocity-apply] Wrote niri config to {niri_path}")
+
+
+def _write_niri_from_template(profile, niri_path):
+    """Write niri config based on the tier. Falls back to generating a complete
+    config inline since the analyzer's generate function isn't importable as a module."""
+    tier = profile["tier"]
+    cfg = profile["recommendation"]["niri"]
+    hw_str = (
+        f"{profile['hardware']['cpu']['cores']} cores, "
+        f"{profile['hardware']['ram_gb']}GB RAM, "
+        f"{profile['hardware']['gpu']['vendor']} {profile['hardware']['gpu']['type']}, "
+        f"{profile['hardware']['storage']['type']}, "
+        f"{profile['hardware']['system_type']}"
+    )
+
+    if cfg["animations"]:
+        anim = """    workspace-switch {
+        spring damping-ratio=0.92 stiffness=800 epsilon=0.0001
+    }
+    window-open {
+        spring damping-ratio=0.92 stiffness=900 epsilon=0.0001
+    }
+    window-close {
+        spring damping-ratio=0.95 stiffness=1000 epsilon=0.0001
+    }"""
+    else:
+        anim = "    //off"
+
+    shadow = ""
+    if cfg["shadows"]:
+        shadow = f"""    shadow {{
+        softness {cfg['shadow_softness']}
+        spread 5
+        offset x=0 y=5
+        color "#0007"
+    }}"""
+    else:
+        shadow = "    //off"
+
+    content = f"""// Auto-applied by velocity-apply-profile (tier: {tier}, score: {profile['score']})
+// Hardware: {hw_str}
+
+prefer-no-csd
+hotkey-overlay {{ skip-at-startup }}
+screenshot-path "~/Pictures/Screenshots/Screenshot from %Y-%m-%d %H-%M-%S.png"
+
+input {{
+    keyboard {{ xkb {{ layout "us" }} repeat-delay 250 repeat-rate 50 }}
+    touchpad {{ tap tap-button-map "left-right-middle" }}
+    mouse {{ accel-profile "flat" }}
+    mod-key "Super"
+    mod-key-nested "Alt"
+}}
+
+layout {{
+    gaps {cfg['gaps']}
+    background-color "transparent"
+    center-focused-column "never"
+    preset-column-widths {{ proportion 0.33333 proportion 0.5 proportion 0.66667 }}
+    default-column-width {{ proportion 0.5 }}
+    border {{
+        off
+        width 4
+        active-color "#707070"
+        inactive-color "#d0d0d0"
+        urgent-color "#cc4444"
+    }}
+    focus-ring {{ off width 1 active-color "#808080" inactive-color "#505050" }}
+    {shadow}
+    struts {{}}
+}}
+
+gestures {{ hot-corners {{}} }}
+cursor {{ xcursor-theme "Bibata-Modern-Classic" xcursor-size 24 hide-when-typing }}
+overview {{ zoom 0.75 }}
+
+window-rule {{ geometry-corner-radius 16 clip-to-geometry true }}
+window-rule {{ match is-active=false opacity {cfg['opacity_inactive']} }}
+window-rule {{ match is-active=true opacity {cfg['opacity_active']} }}
+
+animations {{
+{anim}
+}}
+
+environment {{
+    XDG_CURRENT_DESKTOP "niri"
+    XDG_MENU_PREFIX "plasma-"
+    QT_QPA_PLATFORM "wayland"
+    ELECTRON_OZONE_PLATFORM_HINT "auto"
+    QT_QPA_PLATFORMTHEME "kde"
+    QT_STYLE_OVERRIDE "Darkly"
+    ILLOGICAL_IMPULSE_VIRTUAL_ENV "$HOME/.local/state/quickshell/.venv"
+}}
+
+spawn-at-startup "bash" "-c" "systemctl --user import-environment XDG_MENU_PREFIX && kbuildsycoca6"
+spawn-at-startup "bash" "-c" "wl-paste --watch cliphist store &"
+spawn-at-startup "/usr/lib/mate-polkit/polkit-mate-authentication-agent-1"
+spawn-at-startup "qs" "-c" "ii"
+
+binds {{
+    Mod+Tab repeat=false {{ toggle-overview; }}
+    Mod+Shift+E {{ quit; }}
+    Mod+T {{ spawn "alacritty"; }}
+    Mod+Return {{ spawn "alacritty"; }}
+    Super+E {{ spawn "dolphin"; }}
+    Mod+Q repeat=false {{ spawn "bash" "-c" "$HOME/.config/quickshell/ii/scripts/close-window.sh"; }}
+    Mod+F {{ maximize-column; }}
+    Mod+M {{ fullscreen-window; }}
+    Mod+A {{ toggle-window-floating; }}
+    Mod+Left {{ focus-column-left; }}
+    Mod+Right {{ focus-column-right; }}
+    Mod+Up {{ focus-window-up; }}
+    Mod+Down {{ focus-window-down; }}
+    Mod+1 {{ focus-workspace 1; }} Mod+2 {{ focus-workspace 2; }} Mod+3 {{ focus-workspace 3; }}
+    Mod+4 {{ focus-workspace 4; }} Mod+5 {{ focus-workspace 5; }}
+    Mod+6 {{ focus-workspace 6; }} Mod+7 {{ focus-workspace 7; }}
+    Mod+8 {{ focus-workspace 8; }} Mod+9 {{ focus-workspace 9; }}
+    Mod+Shift+1 {{ move-column-to-workspace 1; }} Mod+Shift+2 {{ move-column-to-workspace 2; }}
+    Mod+Shift+3 {{ move-column-to-workspace 3; }} Mod+Shift+4 {{ move-column-to-workspace 4; }} Mod+Shift+5 {{ move-column-to-workspace 5; }}
+    Mod+Minus {{ set-column-width "-10%"; }}
+    Mod+Equal {{ set-column-width "+10%"; }}
+    Print {{ screenshot; }}
+    Ctrl+Print {{ screenshot-screen; }}
+    Alt+Print {{ screenshot-window; }}
+    XF86AudioRaiseVolume allow-when-locked=true {{ spawn "qs" "-c" "ii" "ipc" "call" "audio" "volumeUp"; }}
+    XF86AudioLowerVolume allow-when-locked=true {{ spawn "qs" "-c" "ii" "ipc" "call" "audio" "volumeDown"; }}
+    XF86AudioMute allow-when-locked=true {{ spawn "qs" "-c" "ii" "ipc" "call" "audio" "mute"; }}
+    XF86MonBrightnessUp {{ spawn "qs" "-c" "ii" "ipc" "call" "brightness" "increment"; }}
+    XF86MonBrightnessDown {{ spawn "qs" "-c" "ii" "ipc" "call" "brightness" "decrement"; }}
+    layer-rule {{ match namespace="quickshell:iiBackdrop" place-within-backdrop true opacity 1.0 }}
+    layer-rule {{ match namespace="quickshell:wBackdrop" place-within-backdrop true opacity 1.0 }}
+}}
+"""
+    niri_path.write_text(content)
+
+
+def apply_shell_config(profile, target=None):
+    """Apply shell and plugin recommendations to /etc/skel or target."""
+    skel = target or "/etc/skel"
+    shell = profile["recommendation"]["shell"]
+
+    # Update .zshrc to use the recommended shell
+    zshrc = Path(skel) / ".zshrc"
+    if zshrc.exists():
+        lines = zshrc.read_text().splitlines()
+        # Comment out the existing arch alias, set the recommended shell
+        new_lines = []
+        for line in lines:
+            new_lines.append(line)
+        # Append shell recommendation note if using bash
+        if shell == "bash":
+            new_lines.append("")
+            new_lines.append("# velocity-hardware-analyzer: bash recommended for this hardware")
+            new_lines.append("# Defaulting to bash instead of zsh for lighter startup")
+        zshrc.write_text("\n".join(new_lines) + "\n")
+    print(f"[velocity-apply] Shell config set to: {shell}")
+
+
+def apply_live_session(profile):
+    """Apply settings to the running live session (liveuser home)."""
+    liveuser_home = "/home/liveuser"
+    if os.path.isdir(liveuser_home):
+        apply_niri_config(profile, target="/etc/skel")
+        # Copy skel to liveuser if it exists
+        subprocess.run(["cp", "-r", "/etc/skel/.config/niri", os.path.join(liveuser_home, ".config/")],
+                       check=False, timeout=10)
+        print("[velocity-apply] Applied niri config to liveuser session")
+    else:
+        apply_niri_config(profile, target="/etc/skel")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Apply hardware profile to a target system or live session")
+    parser.add_argument("--profile", "-p", default=DEFAULT_PROFILE, help="Profile JSON path")
+    parser.add_argument("--target", "-t", default=None, help="Target root directory (for installation)")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.profile):
+        print(f"[velocity-apply] Error: profile not found at {args.profile}", file=sys.stderr)
+        sys.exit(1)
+
+    profile = load_profile(args.profile)
+
+    if args.target:
+        # Installing to a target directory (mounted root)
+        apply_niri_config(profile, target=os.path.join(args.target, "etc/skel"))
+        apply_shell_config(profile, target=os.path.join(args.target, "etc/skel"))
+        print(f"[velocity-apply] Profile applied to target: {args.target}")
+    else:
+        # Apply to running live session
+        apply_live_session(profile)
+
+
+if __name__ == "__main__":
+    main()

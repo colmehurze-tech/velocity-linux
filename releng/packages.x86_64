@@ -155,17 +155,17 @@ plymouth
 inkscape
 xorg-xrandr
 
-#Some custom themes:
+#Custom themes (available in local repo built by installdeps-gh-runner.sh):
 adw-gtk-theme-git
 catppuccin-gtk-theme-mocha
 
-#Some custom fonts:
+#Custom fonts (some from local repo, some from official repos):
 #My own fonts:
 fantasque-sans-mono
 fantasque-sans-propo
 ttf-fantasque-nerd
 
-#Fonts required for the shell:
+#Fonts required for the shell (from local repo):
 otf-space-grotesk
 ttf-jetbrains-mono-nerd
 ttf-material-symbols-variable-git
@@ -173,7 +173,7 @@ ttf-readex-pro
 ttf-rubik-vf
 ttf-twemoji
 
-#DE/WM installation:
+#DE/WM installation (from local repo):
 niri
 quickshell-git
 
@@ -209,7 +209,8 @@ gtk3
 htop
 ark
 kate
+python
 
-#AUR stuff:
+#AUR helper and browser (from local repo):
 yay
 zen-browser-bin
