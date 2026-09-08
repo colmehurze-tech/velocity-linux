@@ -4,7 +4,7 @@ set -euo pipefail
 PKG_DIR="/workspace/releng/airootfs/packages"
 
 # Download AUR helper and apps
-pacman -Syu --noconfirm base-devel git go gtk3 libxt mime-types dbus-glib nss ttf-liberation systemd ffmpeg qt6-declarative qt6-base jemalloc qt6-svg libpipewire qt6-shadertools wayland-protocols cli11 ninja cmake polkit
+pacman -Syu --noconfirm base-devel cpptrace git go gtk3 libxt mime-types dbus-glib nss ttf-liberation systemd ffmpeg qt6-declarative qt6-base jemalloc qt6-svg libpipewire qt6-shadertools wayland-protocols cli11 ninja cmake polkit
 
 cd /tmp
 git clone https://aur.archlinux.org/zen-browser-bin.git
