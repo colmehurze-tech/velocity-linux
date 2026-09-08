@@ -39,8 +39,8 @@ build_aur_pkg /tmp/yay "" true
 build_aur_pkg /tmp/google-breakpad "" true
 
 # Building cpptrace (missing dependency)
-git clone https://aur.archlinux.org/cpptrace.git
-build_aur_pkg /tmp/cpptrace "" true
+#git clone https://aur.archlinux.org/cpptrace.git
+#build_aur_pkg /tmp/cpptrace "" true
 
 # Building zen-browser (--nodeps needed due to circular dependency in AUR PKGBUILD)
 build_aur_pkg /tmp/zen-browser-bin "--nodeps"
